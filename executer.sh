@@ -12,6 +12,9 @@ DATA_DIR=$1
 INPUT=$2
 OUTPUT=$3
 
+HOST_UID=$(id -u)
+HOST_GID=$(id -g)
+
 if [ ! -d "$DATA_DIR" ]; then
     printf 'Error: data directory not found: %s\n' "$DATA_DIR" >&2
     exit 1
@@ -28,4 +31,8 @@ if [ ! -d "$OUT_DIR" ]; then
     mkdir -p "$OUT_DIR"
 fi
 
-docker run --rm -v "$DATA_DIR":/data movie-normalizer "/data/$INPUT" "/data/$OUTPUT"
+# Run containerized movie normalizer
+docker run --rm \
+    -u $(id -u):$(id -g) \
+    -v "$DATA_DIR":/data movie-normalizer \
+    "/data/$INPUT" "/data/$OUTPUT"
