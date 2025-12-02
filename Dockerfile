@@ -53,5 +53,5 @@ WORKDIR /app
 # Expose the CLI as the container entrypoint. Run like:
 # docker run --rm -v /path/to/files:/data <image> /data/input.mkv /data/output.mkv
 # The two positional args are forwarded to the script as file_path_input and file_path_output.
-ENTRYPOINT ["python", "app.py"]
+ENTRYPOINT ["python", "main.py"]
 

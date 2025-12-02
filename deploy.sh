@@ -1,3 +1,3 @@
 #!/bin/sh
 
-docker build -t movie-normalizer .
+docker buildx build -t movie-normalizer .

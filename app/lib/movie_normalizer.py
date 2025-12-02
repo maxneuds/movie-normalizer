@@ -2,6 +2,7 @@ import subprocess
 import tempfile
 import shutil
 import os
+import sys
 from lib.logger import logger
 from typing import List, Tuple
 from pathlib import Path
@@ -37,9 +38,9 @@ class MovieNormalizer:
         """
         logger.info(f"Set pan filter for layout: {layout}")
         if layout.startswith("5.1"):
-            pan_filter = "pan=stereo|FL=0.9*FL+1.1*FC+0.75*LFE+0.25*BL+0.25*SL|FR=0.9*FR+1.1*FC+0.75*LFE+0.25*BR+0.25*SR"
+            pan_filter = "pan=stereo|FL=0.9*FL+1.0*FC+0.75*LFE+0.25*BL+0.25*SL|FR=0.9*FR+1.0*FC+0.75*LFE+0.25*BR+0.25*SR"
         elif layout.startswith("7.1"):
-            pan_filter = "pan=stereo|FL=0.85*FL+1.0*FC+0.75*LFE+0.2*BL+0.2*SL+0.15*BL2+0.15*BR2|FR=0.85*FR+1.0*FC+0.75*LFE+0.2*BR+0.2*SR+0.15*BL2+0.15*BR2"
+            pan_filter = "pan=stereo|FL=0.85*FL+1.0*FC+0.75*LFE+0.35*BL+0.35*SL|FR=0.85*FR+1.0*FC+0.75*LFE+0.35*BR+0.35*SR"
         else:
             raise ValueError(f"Unsupported channel layout: {layout}")
         logger.info(f"Pan filter: \"{pan_filter}\"")
@@ -47,47 +48,83 @@ class MovieNormalizer:
 
     def build_audio_filter(self, layout: str) -> str:
         """
-        Acompressor parameters:
-        This is a dynamic range compressor — it reduces the difference between quiet and loud sounds.
-        threshold=-22dB
-        Compression starts when the signal exceeds –22 dBFS. Everything quieter passes untouched.
-        ratio=4
-        Once over the threshold, volume increases are reduced — e.g. a +3.5 dB input increase only becomes +1 dB output.
-        attack=5
-        Reacts within 10 ms to loud peaks — fast enough to catch sudden shouts or gunshots.
-        release=250
-        Returns to normal gain over 250 ms after the signal drops — keeps it natural instead of pumping.
-        makeup=4
-        Adds 4 dB of gain afterward to make up for the reduction, so overall loudness stays consistent.
-        mix=0.9
-        90% compressed + 10% dry signal — this “parallel compression” keeps transients (like sibilants and detail) alive.
-        Dynaudnorm parameters:
-        This is dynamic audio normalization, a kind of “smart loudness leveling.”
-        f=125
-        Frame size in milliseconds. Smaller = more reactive.
-        (We reduced it to an odd value because the filter requires that — 13, 125, 201, etc.)
-        g=13
-        Max gain in dB. It won’t boost quiet sections by more than +13 dB.
-        p=0.85
-        Peak-to-average ratio; closer to 1.0 means more aggressive leveling.
-        0.85 keeps it natural but prevents big dips in dialogue.
-        Equalizer parameters:
-        f=2000 → Center frequency = 2 kHz, the core of human speech clarity
-        t=q → “Q” filter type = peaking around the target frequency
-        w=1 → Bandwidth (fairly wide)
-        g=2 → +2 dB boost
-        Highpass parameters:
-        f=40 → Cutoff frequency = 40 Hz to remove inaudible sub-bass rumble
-        Alimiter parameters:
-        limit=0.98 → Prevents clipping by ensuring the audio never exceeds 98% of full scale
+        1. acompressor (The "Squasher")
+
+        threshold=-22dB:ratio=4:attack=5:release=250:makeup=4:mix=0.9
+
+        This is a compressor. It reduces the volume of loud sounds.
+
+            threshold=-22dB: Any sound louder than -22dB triggers the compressor. This is a low threshold, meaning it catches almost everything except silence.
+
+            ratio=4: For every 4dB the volume goes over the threshold, the compressor only allows it to rise by 1dB. This effectively "squashes" loud scenes.
+
+            attack=5: 5ms reaction time. It clamps down on gunshots/explosions almost instantly.
+
+            makeup=4: Adds 4dB of volume to the entire signal to make up for the volume lost by squashing the peaks.
+
+            mix=0.9: This is "Parallel Compression." It mixes 90% of the compressed audio with 10% of the original. This prevents the audio from sounding too "flat" or robotic.
+
+        2. dynaudnorm (The "Booster")
+
+        f=125:g=13:p=0.85
+
+        This is the Dynamic Audio Normalizer. While the compressor pushes loud noises down, this pulls quiet noises up.
+
+            It looks at "windows" of audio (125ms long, defined by f=125) and dynamically raises the gain to hit a target peak (p=0.85).
+
+            This is the specific filter that makes whispering audible without you turning up the volume.
+
+        3. equalizer (The "Clarity")
+
+        f=2000:t=q:w=1:g=2
+
+        This is a specific EQ boost to help you understand what people are saying.
+
+            f=2000: Targets 2000 Hz (2kHz). This is the frequency range where human consonant sounds (T, K, S, P) live. These sounds define intelligibility.
+
+            g=2: Adds a +2dB boost to this range.
+
+            Result: Voices sound crisper and "closer" to the listener.
+
+        4. highpass (The "De-Rumbler")
+
+        f=20
+
+        This cuts off all frequencies below 20Hz. The hearable frequency range for humans is generally considered to be from 20 Hz to 20,000 Hz (20 kHz). 
+
+            Why? In a downmix (Stereo), deep sub-bass (earthquake rumbles) eats up a lot of "headroom" (energy) but isn't very audible on standard TV speakers or headphones.
+
+            Removing this invisible energy allows the rest of the audio to be louder and clearer without distortion.
+
+        5. alimiter (The "Safety Net")
+
+        limit=0.98
+
+        This is a Lookahead Limiter.
+
+            Because the previous filters (makeup=4 and dynaudnorm) are adding volume, there is a risk the audio could go above the digital maximum (0dB) and crackle.
+
+            This filter sets a hard ceiling at 0.98. If the audio tries to go higher, it is smoothly limited to prevent digital clipping/distortion.
+
+        Summary of the Flow
+
+            Compressor: "Whoa, that explosion is too loud! Turn it down."
+
+            DynAudNorm: "Hey, they are whispering now. Turn it up!"
+
+            Equalizer: "Make the voices crisp so we can hear the words."
+
+            HighPass: "Get rid of that deep mud/rumble we don't need."
+
+            Limiter: "Don't let the volume go over the red line."
         """
         pan_filter = self.build_pan_filter(layout)
         filter_str = f"{pan_filter}," \
-            "acompressor=threshold=-22dB:ratio=4:attack=5:release=250:makeup=4:mix=0.9," \
+            "acompressor=threshold=-12dB:ratio=3:attack=5:release=250:makeup=1:mix=0.5," \
             "dynaudnorm=f=125:g=13:p=0.85," \
             "equalizer=f=2000:t=q:w=1:g=2," \
-            "highpass=f=40," \
-            "alimiter=limit=0.98"
+            "highpass=f=20," \
+            "alimiter=limit=0.95"
         return filter_str
 
     def normalize_audio_streams(self, file_path_input: str, streams: List[Tuple]) -> str:
@@ -101,16 +138,25 @@ class MovieNormalizer:
                 "ffmpeg", "-y", "-i", file_path_input,
                 "-map", f"0:a:{track_pos}",
                 "-af", audio_filter,
-                "-c:a", "libopus", "-b:a", "192k", "-vbr", "on", "-ac", "2",
+                "-c:a", "libopus", "-b:a", "224k", "-vbr", "on", "-ac", "2",
                 "-f", "matroska",
                 "-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1",
                 audio_out
             ]
             try:
-                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                logger.info(f"Running ffmpeg:\n```\n{' '.join(cmd)}\n```")
+                # Capture stderr so we can log the ffmpeg error output if it fails.
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
             except subprocess.CalledProcessError as e:
-                logger.error("ffmpeg failed:", e.returncode, e.cmd)
-                logger.error("stderr:", e.stderr)
+                if getattr(e, 'stderr', None):
+                    logger.error("ffmpeg stderr:\n\n%s", e.stderr)
+                logger.exception("ffmpeg raised CalledProcessError")
+                sys.exit(1)
+            except Exception as e:
+                if getattr(e, 'stderr', None):
+                    logger.error("ffmpeg stderr:\n\n%s", e.stderr)
+                logger.exception("Unexpected error during ffmpeg processing")
+                sys.exit(1)
             logger.info(f"Created audio file: {audio_out} (lang={lang})")
             results.append((audio_out, lang, layout))
         return results
@@ -132,7 +178,7 @@ class MovieNormalizer:
         # Copy everything by default
         cmd.extend(["-c:v", "copy", "-c:s", "copy"])
         # Re-encode new audio stream into mkv-compatible opus
-        cmd.extend(["-c:a", "libopus", "-b:a", "192k", "-vbr", "on"])
+        cmd.extend(["-c:a", "libopus", "-b:a", "224k", "-vbr", "on"])
         # Set new audio stream names (metadata)
         for i, (_, lang, layout) in enumerate(audio_streams):
             n = i+len(audio_streams)
@@ -150,10 +196,12 @@ class MovieNormalizer:
         cmd.append(file_path_output)
         logger.info(f"Merging new audio stream into file: {file_path_output}")
         try:
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         except subprocess.CalledProcessError as e:
-            logger.error("ffmpeg failed:", e.returncode, e.cmd)
-            logger.error("stderr:", e.stderr)
+            logger.error("ffmpeg failed (returncode=%s cmd=%s)", e.returncode, e.cmd)
+            if getattr(e, 'stderr', None):
+                logger.error("ffmpeg stderr:\n%s", e.stderr)
+            logger.exception("ffmpeg raised CalledProcessError during merge")
         logger.info(f"Result: {file_path_output}")
         return file_path_output
 
@@ -170,10 +218,12 @@ class MovieNormalizer:
             ])
         logger.info(f"Merging new audio stream into file: {file_path_output}")
         try:
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         except subprocess.CalledProcessError as e:
-            logger.error("mkvmerge failed:", e.returncode, e.cmd)
-            logger.error("stderr:", e.stderr)
+            logger.error("mkvmerge failed (returncode=%s cmd=%s)", e.returncode, e.cmd)
+            if getattr(e, 'stderr', None):
+                logger.error("mkvmerge stderr:\n%s", e.stderr)
+            logger.exception("mkvmerge raised CalledProcessError")
         logger.info(f"Result: {file_path_output}")
         return file_path_output
 

@@ -2,15 +2,14 @@
 set -eu
 
 usage() {
-    printf 'Usage: %s DATA_DIR INPUT_FILE OUTPUT_FILE\n' "$(basename "$0")" >&2
+    printf 'Usage: %s DATA_DIR FILE_INPUT\n' "$(basename "$0")" >&2
     exit 2
 }
 
-[ "$#" -eq 3 ] || usage
+[ "$#" -eq 2 ] || usage
 
 DATA_DIR=$1
-INPUT=$2
-OUTPUT=$3
+FILE_INPUT=$2
 
 HOST_UID=$(id -u)
 HOST_GID=$(id -g)
@@ -20,19 +19,13 @@ if [ ! -d "$DATA_DIR" ]; then
     exit 1
 fi
 
-if [ ! -e "$DATA_DIR/$INPUT" ]; then
-    printf 'Error: input file not found: %s\n' "$DATA_DIR/$INPUT" >&2
+if [ ! -e "$DATA_DIR/$FILE_INPUT" ]; then
+    printf 'Error: input file not found: %s\n' "$DATA_DIR/$FILE_INPUT" >&2
     exit 1
-fi
-
-# Ensure output directory exists
-OUT_DIR=$(dirname "$DATA_DIR/$OUTPUT")
-if [ ! -d "$OUT_DIR" ]; then
-    mkdir -p "$OUT_DIR"
 fi
 
 # Run containerized movie normalizer
 docker run --rm \
     -u $(id -u):$(id -g) \
     -v "$DATA_DIR":/data movie-normalizer \
-    "/data/$INPUT" "/data/$OUTPUT"
+    "/data/$FILE_INPUT" "/data/${FILE_INPUT%.*}_normalized.${FILE_INPUT##*.}"
